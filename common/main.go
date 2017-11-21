@@ -16,11 +16,12 @@ type WorkerSettings struct {
 }
 
 type TestStep struct {
-	Name      string
-	Status    string
-	Duration  int
-	Message   string
-	StartTime time.Time
+	Name         string
+	Status       string
+	Duration     int
+	Message      string
+	StartTime    time.Time
+	ThreadNumber int
 }
 
 type AggregatedTestStep struct {

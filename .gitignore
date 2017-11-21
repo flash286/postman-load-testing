@@ -15,3 +15,7 @@
 
 Local.postman_environment.json
 *.json
+postman-load-testing
+newman
+application.log
+application.fail.log

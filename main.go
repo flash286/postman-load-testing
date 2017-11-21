@@ -13,6 +13,8 @@ import (
 	"os"
 	"postman-load-testing/common"
 	"postman-load-testing/scanner"
+	"postman-load-testing/logger"
+	"strings"
 )
 
 var (
@@ -98,12 +100,15 @@ func aggregator(done <-chan string) {
 
 			requestsThroughput = int(float64(requestsCount) / delta.Seconds())
 
-			//fmt.Printf("r: %v, delta: %v, rt: %v\n", requestsCount, delta.Seconds(), requestsThroughput)
-
 			if _, ok := stat[msg.Name]; !ok {
 				stat[msg.Name] = &common.AggregatedTestStep{Name: msg.Name}
 			}
 			stat[msg.Name].AddStepAndRefreshStat(msg)
+
+			if msg.Status == common.TestStatusFail {
+				out_scanner.LogFailMsg(&msg)
+			}
+
 		case <-done:
 			return
 		}
@@ -112,7 +117,7 @@ func aggregator(done <-chan string) {
 
 // -collection test-collection.json -environment
 
-func worker(settings common.WorkerSettings) {
+func worker(settings common.WorkerSettings, threadNumber int) {
 
 	defer wg.Done()
 
@@ -121,7 +126,7 @@ func worker(settings common.WorkerSettings) {
 	var newmanArgs = []string{
 		"run", settings.CollectionPath,
 		fmt.Sprintf("-e%s", settings.EnvironmentPath),
-		"-rteamcity",
+		"-rteamcity,cli",
 	}
 
 	if settings.Delay > 0 {
@@ -132,25 +137,26 @@ func worker(settings common.WorkerSettings) {
 		newmanArgs = append(newmanArgs, fmt.Sprintf("-n%v", settings.Iterations))
 	}
 
-	//finalCmdString := newmanExecutable + " " + strings.Join(newmanArgs[:], " ")
-
-	//log.Println("Starting: ", finalCmdString)
+	finalCmdString := newmanExecutable + " " + strings.Join(newmanArgs[:], " ")
+	logger.Log.Printf("Thread[%v]: Starting: %v", threadNumber, finalCmdString)
 
 	cmd := exec.CommandContext(ctx, newmanExecutable, newmanArgs...)
 
 	stdout, _ := cmd.StdoutPipe()
+	stderr, _ := cmd.StderrPipe()
 
 	err := cmd.Start()
 	if err != nil {
 		panic(err);
 	}
 
-	out_scanner.OutScanner(stdout, aggregationStream)
+	out_scanner.OutScanner(stdout, stderr, aggregationStream, threadNumber)
 
 	cmd.Wait()
 }
 
 func main() {
+
 	flag.Parse()
 	aggDone := make(chan string)
 
@@ -158,6 +164,9 @@ func main() {
 		flag.PrintDefaults()
 		os.Exit(2)
 	}
+
+	fmt.Printf("Log File: %s\n", logger.LogPath)
+	fmt.Printf("Fail Log File: %s\n", logger.FailLogPath)
 
 	settings := common.WorkerSettings{
 		Iterations:      *iterationCmd,
@@ -173,7 +182,7 @@ func main() {
 
 	for i := 0; i < nParallel; i ++ {
 		wg.Add(1)
-		go worker(settings)
+		go worker(settings, i+1)
 	}
 
 	wg.Wait()
