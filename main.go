@@ -4,84 +4,29 @@ import (
 	"fmt"
 	"os/exec"
 	"context"
-	"bufio"
-	"io"
-	"regexp"
-	"strconv"
-	"log"
 	"time"
 	"sync"
-	"strings"
 	"github.com/olekukonko/tablewriter"
 	"github.com/gosuri/uilive"
 	"sort"
+	"flag"
+	"os"
+	"postman-load-testing/common"
+	"postman-load-testing/scanner"
 )
-
-const TestStatusSuccess = "success"
-const TestStatusFail = "fail"
-
-type WorkerSettings struct {
-	Delay      int
-	Iterations int
-}
-
-type TestStep struct {
-	Name      string
-	Status    string
-	Duration  int
-	Message   string
-	StartTime time.Time
-}
-
-type AggregatedTestStep struct {
-	Name         string
-	TotalCount   int
-	TotalSuccess int
-	TotalFail    int
-	AvgDuration  float64
-	Steps        []TestStep
-}
 
 var (
-	newmanExecutable  = "newman"
-	collectionPath    = "c33c0e4cee3b90533b2a.json"
-	environmentPath   = "Local.postman_environment.json"
-	nParallel         = 1
-	aggregationStream = make(chan TestStep)
-	stat              = make(map[string]*AggregatedTestStep)
-	wg                sync.WaitGroup
+	newmanExecutable   = "newman"
+	collectionPathCmd  = flag.String("collection", "", "URL or path to a Postman Collection")
+	environmentPathCmd = flag.String("environment", "", "Specify a URL or Path to a Postman Environment")
+	nParallelCmd       = flag.Int("n", 1, "Number of parallel threads")
+	delayCmd           = flag.Int("d", 0, "Specify the extent of delay between requests (milliseconds) (default 0)")
+	iterationCmd       = flag.Int("i", 1, "Define the number of iterations to run.")
+	aggregationStream  = make(chan common.TestStep)
+	requestsThroughput = 0
+	stat               = make(map[string]*common.AggregatedTestStep)
+	wg                 sync.WaitGroup
 )
-
-func (ts *TestStep) String() string {
-	return fmt.Sprintf("\t<TestStep: Name: %s, Duration: %d, Status: %s>,\n", ts.Name, ts.Duration, ts.Status)
-}
-
-func (testStat *AggregatedTestStep) String() string {
-	return fmt.Sprintf(
-		"\n<AggregatedTestStep\n\tName: %s\n\tTotalCount: %v\n\tSuccess/Fail: %v\\%v\n\tAvg Duration: %v\n>",
-		testStat.Name, testStat.TotalCount, testStat.TotalSuccess, testStat.TotalFail, testStat.AvgDuration,
-	)
-}
-
-func (testStat *AggregatedTestStep) addStepAndRefreshStat(step TestStep) {
-	testStat.Steps = append(testStat.Steps, step)
-
-	if step.Status == TestStatusSuccess {
-		testStat.TotalSuccess++
-	} else if step.Status == TestStatusFail {
-		testStat.TotalFail++
-	}
-	testStat.TotalCount++
-
-	if step.Status == TestStatusSuccess {
-		if testStat.AvgDuration == 0.0 {
-			testStat.AvgDuration = float64(step.Duration)
-		} else {
-			newAvg := (testStat.AvgDuration + float64(step.Duration)) / 2
-			testStat.AvgDuration = newAvg
-		}
-	}
-}
 
 func renderResultTable(table *tablewriter.Table) {
 	var keys []string
@@ -104,6 +49,7 @@ func renderResultTable(table *tablewriter.Table) {
 			fmt.Sprintf("%v", value.TotalCount),
 		}
 		table.Append(datapoint)
+		table.SetFooter([]string{"", "", "", "Requests Throughput", fmt.Sprintf("%v rps", requestsThroughput)})
 	}
 	table.Render()
 }
@@ -123,6 +69,7 @@ func StatusPrinter(done chan string) {
 		case <-timer.C:
 			renderResultTable(table)
 			table.ClearRows()
+			table.ClearFooter()
 		case <-done:
 			renderResultTable(table)
 			writer.Stop()
@@ -132,28 +79,50 @@ func StatusPrinter(done chan string) {
 }
 
 func aggregator(done chan string) {
+
+	requestsCount := 0
+	var startTime time.Time
+
 	for {
 		select {
 		case msg := <-aggregationStream:
-			if _, ok := stat[msg.Name]; !ok {
-				stat[msg.Name] = &AggregatedTestStep{Name: msg.Name}
-				//stat[msg.Name].Steps = make([]TestStep, 10)
+
+			if requestsCount == 0 {
+				startTime = time.Now()
 			}
-			stat[msg.Name].addStepAndRefreshStat(msg)
-			//fmt.Println(stat[msg.Name])
+
+			requestsCount++
+
+			currentTime := time.Now()
+			delta := currentTime.Sub(startTime)
+
+			requestsThroughput = int(float64(requestsCount) / delta.Seconds())
+
+			//fmt.Printf("r: %v, delta: %v, rt: %v\n", requestsCount, delta.Seconds(), requestsThroughput)
+
+			if _, ok := stat[msg.Name]; !ok {
+				stat[msg.Name] = &common.AggregatedTestStep{Name: msg.Name}
+			}
+			stat[msg.Name].AddStepAndRefreshStat(msg)
 		case <-done:
 			return
 		}
 	}
 }
 
-func worker(settings WorkerSettings) {
+// -collection test-collection.json -environment
 
-	//defer wg.Done()
+func worker(settings common.WorkerSettings) {
+
+	defer wg.Done()
 
 	ctx := context.Background()
 
-	var newmanArgs = []string{"run", collectionPath, fmt.Sprintf("-e%s", environmentPath), "-rteamcity"}
+	var newmanArgs = []string{
+		"run", settings.CollectionPath,
+		fmt.Sprintf("-e%s", settings.EnvironmentPath),
+		"-rteamcity",
+	}
 
 	if settings.Delay > 0 {
 		newmanArgs = append(newmanArgs, fmt.Sprintf("--delay-request=%v", settings.Delay))
@@ -163,9 +132,9 @@ func worker(settings WorkerSettings) {
 		newmanArgs = append(newmanArgs, fmt.Sprintf("-n%v", settings.Iterations))
 	}
 
-	finalCmdString := newmanExecutable + " " + strings.Join(newmanArgs[:], " ")
+	//finalCmdString := newmanExecutable + " " + strings.Join(newmanArgs[:], " ")
 
-	log.Println("Starting: ", finalCmdString)
+	//log.Println("Starting: ", finalCmdString)
 
 	cmd := exec.CommandContext(ctx, newmanExecutable, newmanArgs...)
 
@@ -176,64 +145,28 @@ func worker(settings WorkerSettings) {
 		panic(err);
 	}
 
-	OutScanner(stdout)
+	out_scanner.OutScanner(stdout, aggregationStream)
+
 	cmd.Wait()
-	wg.Done()
-}
-
-func OutScanner(stdout io.ReadCloser) {
-
-	tasks := make(map[string]*TestStep)
-	taskStartRe := regexp.MustCompile(`^##teamcity\[testStarted name='(?P<TaskName>.*)' captureStandardOutput='(?P<TaskOutPut>.*)']`)
-	taskFinishedRe := regexp.MustCompile(`##teamcity\[testFinished name='(?P<TaskName>.*)' duration='(?P<TaskOutPut>.*)']`)
-	taskFailedRe := regexp.MustCompile(`##teamcity\[testFailed name='(?P<TaskName>.*)' message='(?P<TaskOutPut>.*)']`)
-
-	scanner := bufio.NewScanner(stdout)
-	scanner.Split(bufio.ScanLines)
-	for scanner.Scan() {
-		msg := scanner.Text()
-		testStartedMeta := taskStartRe.FindAllStringSubmatch(msg, -1)
-		testFinishedMeta := taskFinishedRe.FindAllStringSubmatch(msg, -1)
-		testFailedMeta := taskFailedRe.FindAllStringSubmatch(msg, -1)
-
-		//fmt.Printf("%s\n", msg)
-
-		if len(testStartedMeta) > 0 {
-			taskName := testStartedMeta[0][1]
-			tasks[taskName] = &TestStep{Name: taskName, StartTime: time.Now()}
-		} else if len(testFinishedMeta) > 0 {
-			taskName := testFinishedMeta[0][1]
-			taskDuration := testFinishedMeta[0][2]
-
-			if val, ok := tasks[taskName]; ok {
-				duration, _ := strconv.Atoi(taskDuration)
-				val.Duration = duration
-
-				if val.Status != TestStatusFail {
-					val.Status = TestStatusSuccess
-				}
-				aggregationStream <- *tasks[taskName]
-			}
-		} else if len(testFailedMeta) > 0 {
-			taskName := testFailedMeta[0][1]
-			taskMessage := testFailedMeta[0][2]
-
-			if val, ok := tasks[taskName]; ok {
-				val.Duration = 0
-				val.Message = taskMessage
-				val.Status = TestStatusFail
-			}
-			aggregationStream <- *tasks[taskName]
-		}
-	}
 }
 
 func main() {
-	//timeStart := time.Now()
-	done := make(chan string)
+	flag.Parse()
 	aggDone := make(chan string)
 
-	settings := WorkerSettings{Iterations: 10, Delay: 1000}
+	if *collectionPathCmd == "" || *environmentPathCmd == "" {
+		flag.PrintDefaults()
+		os.Exit(2)
+	}
+
+	settings := common.WorkerSettings{
+		Iterations:      *iterationCmd,
+		Delay:           *delayCmd,
+		CollectionPath:  *collectionPathCmd,
+		EnvironmentPath: *environmentPathCmd,
+	}
+
+	nParallel := *nParallelCmd
 
 	go aggregator(aggDone)
 	go StatusPrinter(aggDone)
@@ -245,10 +178,7 @@ func main() {
 
 	wg.Wait()
 
+	time.Sleep(time.Second * 2)
+
 	aggDone <- "Done"
-
-	//timeFinish := time.Now()
-	//duration := timeFinish.Sub(timeStart)
-
-	//log.Printf("Time: %v seconds", duration.Seconds())
 }
