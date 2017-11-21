@@ -16,7 +16,7 @@ var (
 	taskFailedRe       = regexp.MustCompile(`##teamcity\[testFailed name='(?P<TaskName>.*)' message='(?P<TaskOutPut>.*)']`)
 )
 
-func OutScanner(stdout io.ReadCloser, aggregationStream chan common.TestStep) {
+func OutScanner(stdout io.ReadCloser, aggregationStream chan<- common.TestStep) {
 
 	tasks := make(map[string]*common.TestStep)
 

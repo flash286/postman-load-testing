@@ -22,7 +22,7 @@ var (
 	nParallelCmd       = flag.Int("n", 1, "Number of parallel threads")
 	delayCmd           = flag.Int("d", 0, "Specify the extent of delay between requests (milliseconds) (default 0)")
 	iterationCmd       = flag.Int("i", 1, "Define the number of iterations to run.")
-	aggregationStream  = make(chan common.TestStep)
+	aggregationStream  = make(chan common.TestStep, 1000)
 	requestsThroughput = 0
 	stat               = make(map[string]*common.AggregatedTestStep)
 	wg                 sync.WaitGroup
@@ -78,7 +78,7 @@ func StatusPrinter(done chan string) {
 	}
 }
 
-func aggregator(done chan string) {
+func aggregator(done <-chan string) {
 
 	requestsCount := 0
 	var startTime time.Time
