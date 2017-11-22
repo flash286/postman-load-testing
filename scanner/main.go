@@ -9,6 +9,7 @@ import (
 	"postman-load-testing/common"
 	"postman-load-testing/logger"
 	"fmt"
+	"postman-load-testing/aggregator"
 )
 
 var (
@@ -22,7 +23,7 @@ func LogFailMsg(msg *common.TestStep) {
 	logger.FailLog.Printf("Thread[%v]: %s", msg.ThreadNumber, msgBody)
 }
 
-func OutScanner(stdout io.ReadCloser, stderr io.ReadCloser, aggregationStream chan<- common.TestStep, threadNumber int) {
+func OutScanner(stdout io.ReadCloser, stderr io.ReadCloser, aggregatorWorker *aggregator.Aggregator, threadNumber int) {
 
 	tasks := make(map[string]*common.TestStep)
 
@@ -55,7 +56,7 @@ func OutScanner(stdout io.ReadCloser, stderr io.ReadCloser, aggregationStream ch
 
 				tasks[taskName] = val
 
-				aggregationStream <- *tasks[taskName]
+				aggregatorWorker.Source <- *tasks[taskName]
 			}
 		} else if len(testFailedMeta) > 0 {
 			taskName := testFailedMeta[0][1]

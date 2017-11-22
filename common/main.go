@@ -8,6 +8,11 @@ import (
 const TestStatusSuccess = "success"
 const TestStatusFail = "fail"
 
+type Worker interface {
+	Close()
+	Run()
+}
+
 type WorkerSettings struct {
 	CollectionPath  string
 	EnvironmentPath string

@@ -4,17 +4,16 @@ import (
 	"fmt"
 	"os/exec"
 	"context"
-	"time"
 	"sync"
-	"github.com/olekukonko/tablewriter"
-	"github.com/gosuri/uilive"
-	"sort"
 	"flag"
 	"os"
 	"postman-load-testing/common"
 	"postman-load-testing/scanner"
 	"postman-load-testing/logger"
 	"strings"
+	"postman-load-testing/aggregator"
+	"postman-load-testing/console_printer"
+	"time"
 )
 
 var (
@@ -24,100 +23,12 @@ var (
 	nParallelCmd       = flag.Int("n", 1, "Number of parallel threads")
 	delayCmd           = flag.Int("d", 0, "Specify the extent of delay between requests (milliseconds) (default 0)")
 	iterationCmd       = flag.Int("i", 1, "Define the number of iterations to run.")
-	aggregationStream  = make(chan common.TestStep, 1000)
-	requestsThroughput = 0
-	stat               = make(map[string]*common.AggregatedTestStep)
 	wg                 sync.WaitGroup
 )
 
-func renderResultTable(table *tablewriter.Table) {
-	var keys []string
-
-	for k := range stat {
-		keys = append(keys, k)
-	}
-
-	sort.Strings(keys)
-
-	for _, key := range keys {
-
-		value := stat[key]
-
-		datapoint := []string{
-			value.Name,
-			fmt.Sprintf("%v ms", value.AvgDuration),
-			fmt.Sprintf("%v", value.TotalSuccess),
-			fmt.Sprintf("%v", value.TotalFail),
-			fmt.Sprintf("%v", value.TotalCount),
-		}
-		table.Append(datapoint)
-		table.SetFooter([]string{"", "", "", "Requests Throughput", fmt.Sprintf("%v rps", requestsThroughput)})
-	}
-	table.Render()
-}
-
-func StatusPrinter(done chan string) {
-
-	timer := time.NewTicker(time.Second * 1)
-	writer := uilive.New()
-
-	table := tablewriter.NewWriter(writer)
-	table.SetHeader([]string{"Name", "Avg. Duration", "Success", "Fail", "Total"})
-
-	writer.Start()
-
-	for {
-		select {
-		case <-timer.C:
-			renderResultTable(table)
-			table.ClearRows()
-			table.ClearFooter()
-		case <-done:
-			renderResultTable(table)
-			writer.Stop()
-			return
-		}
-	}
-}
-
-func aggregator(done <-chan string) {
-
-	requestsCount := 0
-	var startTime time.Time
-
-	for {
-		select {
-		case msg := <-aggregationStream:
-
-			if requestsCount == 0 {
-				startTime = time.Now()
-			}
-
-			requestsCount++
-
-			currentTime := time.Now()
-			delta := currentTime.Sub(startTime)
-
-			requestsThroughput = int(float64(requestsCount) / delta.Seconds())
-
-			if _, ok := stat[msg.Name]; !ok {
-				stat[msg.Name] = &common.AggregatedTestStep{Name: msg.Name}
-			}
-			stat[msg.Name].AddStepAndRefreshStat(msg)
-
-			if msg.Status == common.TestStatusFail {
-				out_scanner.LogFailMsg(&msg)
-			}
-
-		case <-done:
-			return
-		}
-	}
-}
-
 // -collection test-collection.json -environment
 
-func worker(settings common.WorkerSettings, threadNumber int) {
+func worker(settings common.WorkerSettings, aggregatorWorker *aggregator.Aggregator, threadNumber int) {
 
 	defer wg.Done()
 
@@ -150,7 +61,7 @@ func worker(settings common.WorkerSettings, threadNumber int) {
 		panic(err);
 	}
 
-	out_scanner.OutScanner(stdout, stderr, aggregationStream, threadNumber)
+	out_scanner.OutScanner(stdout, stderr, aggregatorWorker, threadNumber)
 
 	cmd.Wait()
 }
@@ -158,7 +69,6 @@ func worker(settings common.WorkerSettings, threadNumber int) {
 func main() {
 
 	flag.Parse()
-	aggDone := make(chan string)
 
 	if *collectionPathCmd == "" || *environmentPathCmd == "" {
 		flag.PrintDefaults()
@@ -174,20 +84,25 @@ func main() {
 		CollectionPath:  *collectionPathCmd,
 		EnvironmentPath: *environmentPathCmd,
 	}
-
 	nParallel := *nParallelCmd
 
-	go aggregator(aggDone)
-	go StatusPrinter(aggDone)
+	aggregatorWorker := aggregator.CreateAggregator(nParallel * settings.Iterations)
+	consoleStatusWorker := console_printer.CreateConsoleStatusPrinter(aggregatorWorker)
 
 	for i := 0; i < nParallel; i ++ {
 		wg.Add(1)
-		go worker(settings, i+1)
+		go worker(settings, aggregatorWorker, i+1)
 	}
+
+	go aggregatorWorker.Run()
+	go consoleStatusWorker.Run()
 
 	wg.Wait()
 
 	time.Sleep(time.Second * 2)
 
-	aggDone <- "Done"
+	aggregatorWorker.Close()
+	consoleStatusWorker.Close()
+
+	time.Sleep(time.Second * 2)
 }
