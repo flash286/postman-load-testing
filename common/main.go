@@ -61,11 +61,10 @@ func (testStat *AggregatedTestStep) AddStepAndRefreshStat(step TestStep) {
 	testStat.TotalCount++
 
 	if step.Status == TestStatusSuccess {
-		if testStat.AvgDuration == 0.0 {
+		if testStat.TotalSuccess == 1 {
 			testStat.AvgDuration = float64(step.Duration)
 		} else {
-			newAvg := (testStat.AvgDuration + float64(step.Duration)) / 2
-			testStat.AvgDuration = newAvg
+			testStat.AvgDuration = (testStat.AvgDuration*float64(testStat.TotalSuccess-1) + float64(step.Duration)) / float64(testStat.TotalSuccess)
 		}
 	}
 }

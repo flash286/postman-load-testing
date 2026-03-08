@@ -2,30 +2,69 @@ package aggregator
 
 import (
 	"postman-load-testing/common"
+	"sync"
 	"time"
 )
 
 type Aggregator struct {
 	Source             chan common.TestStep
 	Quit               chan bool
-	RequestsThroughput int
+	mu                 sync.RWMutex
+	requestsThroughput int
 	requestsCount      int
-	Stat               map[string]*common.AggregatedTestStep
+	totalSuccess       int
+	totalFail          int
+	startTime          time.Time
+	stat               map[string]*common.AggregatedTestStep
 }
 
 func (w *Aggregator) Close() {
 	w.Quit <- true
 }
 
+func (w *Aggregator) GetStat() map[string]*common.AggregatedTestStep {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	result := make(map[string]*common.AggregatedTestStep, len(w.stat))
+	for k, v := range w.stat {
+		cpy := *v
+		result[k] = &cpy
+	}
+	return result
+}
+
+func (w *Aggregator) GetThroughput() int {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.requestsThroughput
+}
+
+func (w *Aggregator) GetElapsed() time.Duration {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	if w.startTime.IsZero() {
+		return 0
+	}
+	return time.Since(w.startTime)
+}
+
+func (w *Aggregator) GetTotals() (total, success, fail int) {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.requestsCount, w.totalSuccess, w.totalFail
+}
+
 func (w *Aggregator) Run() {
 	w.requestsCount = 0
 	var startTime time.Time
-	//q := false
 	for {
 		select {
 		case msg := <-w.Source:
 			if w.requestsCount == 0 {
 				startTime = time.Now()
+				w.mu.Lock()
+				w.startTime = startTime
+				w.mu.Unlock()
 			}
 
 			w.requestsCount++
@@ -33,12 +72,23 @@ func (w *Aggregator) Run() {
 			currentTime := time.Now()
 			delta := currentTime.Sub(startTime)
 
-			w.RequestsThroughput = int(float64(w.requestsCount) / delta.Seconds())
-
-			if _, ok := w.Stat[msg.Name]; !ok {
-				w.Stat[msg.Name] = &common.AggregatedTestStep{Name: msg.Name}
+			w.mu.Lock()
+			if delta.Seconds() > 0 {
+				w.requestsThroughput = int(float64(w.requestsCount) / delta.Seconds())
 			}
-			w.Stat[msg.Name].AddStepAndRefreshStat(msg)
+
+			switch msg.Status {
+			case common.TestStatusSuccess:
+				w.totalSuccess++
+			case common.TestStatusFail:
+				w.totalFail++
+			}
+
+			if _, ok := w.stat[msg.Name]; !ok {
+				w.stat[msg.Name] = &common.AggregatedTestStep{Name: msg.Name}
+			}
+			w.stat[msg.Name].AddStepAndRefreshStat(msg)
+			w.mu.Unlock()
 		case <-w.Quit:
 			return
 		}
@@ -49,7 +99,7 @@ func CreateAggregator(capacity int) *Aggregator {
 	aggregator := Aggregator{
 		Source: make(chan common.TestStep, capacity),
 		Quit:   make(chan bool),
-		Stat:   make(map[string]*common.AggregatedTestStep),
+		stat:   make(map[string]*common.AggregatedTestStep),
 	}
 	return &aggregator
 }

@@ -7,9 +7,17 @@ linters:
   exclusions:
     paths:
       - bin
+    rules:
+      - linters: [gosec]
+        text: "G204"
+      - linters: [gosec]
+        text: "G306"
+        path: "_test\\.go"
   enable:
     - errcheck
     - govet
     - staticcheck
     - unused
     - ineffassign
+    - gosec
+    - misspell
