@@ -256,11 +256,11 @@ func TestPipelineScannerAggregator(t *testing.T) {
 	stderrReader, stderrWriter := io.Pipe()
 
 	go func() {
-		stdoutWriter.Write([]byte(newmanOutput))
-		stdoutWriter.Close()
+		_, _ = stdoutWriter.Write([]byte(newmanOutput))
+		_ = stdoutWriter.Close()
 	}()
 	go func() {
-		stderrWriter.Close()
+		_ = stderrWriter.Close()
 	}()
 
 	out_scanner.OutScanner(stdoutReader, stderrReader, agg, 1)
@@ -297,8 +297,8 @@ func TestPipelineEmptyOutput(t *testing.T) {
 
 	stdoutR, stdoutW := io.Pipe()
 	stderrR, stderrW := io.Pipe()
-	go func() { stdoutW.Close() }()
-	go func() { stderrW.Close() }()
+	go func() { _ = stdoutW.Close() }()
+	go func() { _ = stderrW.Close() }()
 
 	out_scanner.OutScanner(stdoutR, stderrR, agg, 1)
 	time.Sleep(200 * time.Millisecond)
