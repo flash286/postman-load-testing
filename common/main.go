@@ -52,9 +52,10 @@ func (testStat *AggregatedTestStep) String() string {
 func (testStat *AggregatedTestStep) AddStepAndRefreshStat(step TestStep) {
 	testStat.Steps = append(testStat.Steps, step)
 
-	if step.Status == TestStatusSuccess {
+	switch step.Status {
+	case TestStatusSuccess:
 		testStat.TotalSuccess++
-	} else if step.Status == TestStatusFail {
+	case TestStatusFail:
 		testStat.TotalFail++
 	}
 	testStat.TotalCount++

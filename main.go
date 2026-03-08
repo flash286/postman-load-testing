@@ -63,7 +63,7 @@ func worker(settings common.WorkerSettings, aggregatorWorker *aggregator.Aggrega
 
 	out_scanner.OutScanner(stdout, stderr, aggregatorWorker, threadNumber)
 
-	cmd.Wait()
+	_ = cmd.Wait()
 }
 
 func main() {
