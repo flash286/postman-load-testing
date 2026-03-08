@@ -231,6 +231,94 @@ func TestEndToEndWithNewmanParallel(t *testing.T) {
 	agg.Close()
 }
 
+// TestEndToEndModernFormat verifies that modern Postman v2.1.0 exports
+// (structured URLs, folders, auth blocks, protocolProfileBehavior) work correctly.
+func TestEndToEndModernFormat(t *testing.T) {
+	if _, err := exec.LookPath("newman"); err != nil {
+		t.Skip("newman not installed, skipping real e2e test")
+	}
+
+	srv := testdata.NewTestAPIServer()
+	if err := srv.Start(); err != nil {
+		t.Fatalf("failed to start test server: %v", err)
+	}
+	defer srv.Stop()
+
+	baseURL := fmt.Sprintf("http://%s", srv.Addr)
+	t.Logf("Test API server running at %s", baseURL)
+
+	tmpDir := t.TempDir()
+	envPath := writeTestEnvironment(t, tmpDir, baseURL)
+
+	collectionPath := filepath.Join("testdata", "test_collection_modern.json")
+	if _, err := os.Stat(collectionPath); err != nil {
+		t.Fatalf("modern collection file not found: %v", err)
+	}
+
+	args := []string{
+		"run", collectionPath,
+		"-e", envPath,
+		"-r", "teamcity,cli",
+	}
+
+	cmd := exec.Command("newman", args...)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("failed to get stdout pipe: %v", err)
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		t.Fatalf("failed to get stderr pipe: %v", err)
+	}
+
+	agg := aggregator.CreateAggregator(100)
+	go agg.Run()
+
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("failed to start newman: %v", err)
+	}
+
+	out_scanner.OutScanner(stdout, stderr, agg, 1)
+
+	if err := cmd.Wait(); err != nil {
+		t.Logf("newman exited with: %v (may include test failures)", err)
+	}
+
+	time.Sleep(500 * time.Millisecond)
+
+	if len(agg.Stat) == 0 {
+		t.Fatal("aggregator has no results — newman produced no parseable output for modern format collection")
+	}
+
+	t.Logf("Modern format: aggregated %d distinct test steps:", len(agg.Stat))
+	totalTests := 0
+	totalSuccess := 0
+	totalFail := 0
+	for name, stat := range agg.Stat {
+		t.Logf("  %s: total=%d success=%d fail=%d avg=%.1fms",
+			name, stat.TotalCount, stat.TotalSuccess, stat.TotalFail, stat.AvgDuration)
+		totalTests += stat.TotalCount
+		totalSuccess += stat.TotalSuccess
+		totalFail += stat.TotalFail
+	}
+
+	// Modern collection has 5 requests in 3 folders, each with 2 tests = 10 assertions
+	// but scanner groups by request name, so we expect 5 aggregated entries
+	if totalTests < 5 {
+		t.Errorf("expected at least 5 test results from modern format, got %d", totalTests)
+	}
+
+	if totalFail > 0 {
+		t.Errorf("expected 0 failures with modern format, got %d", totalFail)
+	}
+
+	if totalSuccess == 0 {
+		t.Error("expected at least some successes with modern format")
+	}
+
+	agg.Close()
+}
+
 // --- Pipeline unit tests (kept from original) ---
 
 func TestPipelineScannerAggregator(t *testing.T) {
