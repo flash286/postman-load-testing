@@ -12,6 +12,9 @@ type Aggregator struct {
 	mu                 sync.RWMutex
 	requestsThroughput int
 	requestsCount      int
+	totalSuccess       int
+	totalFail          int
+	startTime          time.Time
 	stat               map[string]*common.AggregatedTestStep
 }
 
@@ -22,7 +25,6 @@ func (w *Aggregator) Close() {
 func (w *Aggregator) GetStat() map[string]*common.AggregatedTestStep {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
-	// Return a shallow copy of the map to avoid concurrent map access
 	result := make(map[string]*common.AggregatedTestStep, len(w.stat))
 	for k, v := range w.stat {
 		cpy := *v
@@ -37,6 +39,21 @@ func (w *Aggregator) GetThroughput() int {
 	return w.requestsThroughput
 }
 
+func (w *Aggregator) GetElapsed() time.Duration {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	if w.startTime.IsZero() {
+		return 0
+	}
+	return time.Since(w.startTime)
+}
+
+func (w *Aggregator) GetTotals() (total, success, fail int) {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.requestsCount, w.totalSuccess, w.totalFail
+}
+
 func (w *Aggregator) Run() {
 	w.requestsCount = 0
 	var startTime time.Time
@@ -45,6 +62,9 @@ func (w *Aggregator) Run() {
 		case msg := <-w.Source:
 			if w.requestsCount == 0 {
 				startTime = time.Now()
+				w.mu.Lock()
+				w.startTime = startTime
+				w.mu.Unlock()
 			}
 
 			w.requestsCount++
@@ -55,6 +75,13 @@ func (w *Aggregator) Run() {
 			w.mu.Lock()
 			if delta.Seconds() > 0 {
 				w.requestsThroughput = int(float64(w.requestsCount) / delta.Seconds())
+			}
+
+			switch msg.Status {
+			case common.TestStatusSuccess:
+				w.totalSuccess++
+			case common.TestStatusFail:
+				w.totalFail++
 			}
 
 			if _, ok := w.stat[msg.Name]; !ok {

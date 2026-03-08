@@ -10,9 +10,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/charmbracelet/lipgloss"
+
 	"postman-load-testing/aggregator"
-	"postman-load-testing/console_printer"
 	"postman-load-testing/common"
+	"postman-load-testing/console_printer"
 	"postman-load-testing/logger"
 	out_scanner "postman-load-testing/scanner"
 )
@@ -103,9 +105,6 @@ func main() {
 		os.Exit(2)
 	}
 
-	fmt.Printf("Log File: %s\n", logger.LogPath)
-	fmt.Printf("Fail Log File: %s\n", logger.FailLogPath)
-
 	settings := common.WorkerSettings{
 		Iterations:      *iterationCmd,
 		Delay:           *delayCmd,
@@ -114,8 +113,10 @@ func main() {
 	}
 	nParallel := *nParallelCmd
 
+	printBanner(settings, nParallel)
+
 	aggregatorWorker := aggregator.CreateAggregator(nParallel * settings.Iterations)
-	consoleStatusWorker := console_printer.CreateConsoleStatusPrinter(aggregatorWorker)
+	consoleStatusWorker := console_printer.CreateConsoleStatusPrinter(aggregatorWorker, nParallel)
 
 	go aggregatorWorker.Run()
 	go consoleStatusWorker.Run()
@@ -132,4 +133,43 @@ func main() {
 
 	aggregatorWorker.Close()
 	consoleStatusWorker.Close()
+}
+
+func printBanner(settings common.WorkerSettings, nParallel int) {
+	cyan := lipgloss.Color("#00D7FF")
+	gray := lipgloss.Color("#6C6C6C")
+
+	logo := lipgloss.NewStyle().Bold(true).Foreground(cyan).Render(
+		"POSTMAN LOAD TESTER")
+
+	labelStyle := lipgloss.NewStyle().Foreground(gray)
+	valueStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#FFFFFF")).Bold(true)
+
+	info := fmt.Sprintf(
+		"  %s %s\n  %s %s\n  %s %s   %s %s   %s %s",
+		labelStyle.Render("Collection:"),
+		valueStyle.Render(settings.CollectionPath),
+		labelStyle.Render("Environment:"),
+		valueStyle.Render(settings.EnvironmentPath),
+		labelStyle.Render("Workers:"),
+		valueStyle.Render(fmt.Sprintf("%d", nParallel)),
+		labelStyle.Render("Iterations:"),
+		valueStyle.Render(fmt.Sprintf("%d", settings.Iterations)),
+		labelStyle.Render("Delay:"),
+		valueStyle.Render(fmt.Sprintf("%dms", settings.Delay)),
+	)
+
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(cyan).
+		PaddingLeft(1).
+		PaddingRight(1).
+		Render(fmt.Sprintf(" %s\n\n%s\n\n  %s %s  |  %s %s",
+			logo, info,
+			labelStyle.Render("Log:"), valueStyle.Render(logger.LogPath),
+			labelStyle.Render("Fail Log:"), valueStyle.Render(logger.FailLogPath),
+		))
+
+	fmt.Println(box)
+	fmt.Println()
 }
