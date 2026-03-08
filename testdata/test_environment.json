@@ -1,0 +1,11 @@
+{
+	"name": "Load Test Environment",
+	"_comment": "This is a template. The e2e tests generate a runtime environment file with the actual server address.",
+	"values": [
+		{
+			"key": "base_url",
+			"value": "http://127.0.0.1:8080",
+			"enabled": true
+		}
+	]
+}

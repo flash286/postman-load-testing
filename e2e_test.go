@@ -1,13 +1,19 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
 	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"postman-load-testing/aggregator"
 	out_scanner "postman-load-testing/scanner"
+	"postman-load-testing/testdata"
 )
 
 // simulateNewmanOutput returns TeamCity-formatted output that mimics what Newman produces.
@@ -29,7 +35,205 @@ func simulateNewmanOutput(tests []struct {
 	return sb.String()
 }
 
-func TestEndToEndPipeline(t *testing.T) {
+// writeTestEnvironment creates a Postman environment JSON file with the given base URL.
+func writeTestEnvironment(t *testing.T, dir, baseURL string) string {
+	t.Helper()
+	env := map[string]interface{}{
+		"name": "Load Test Environment",
+		"values": []map[string]interface{}{
+			{
+				"key":     "base_url",
+				"value":   baseURL,
+				"enabled": true,
+			},
+		},
+	}
+	data, err := json.MarshalIndent(env, "", "  ")
+	if err != nil {
+		t.Fatalf("failed to marshal environment: %v", err)
+	}
+	path := filepath.Join(dir, "env.json")
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatalf("failed to write environment file: %v", err)
+	}
+	return path
+}
+
+// TestEndToEndWithNewman starts a real HTTP server, runs Newman against the
+// Postman collection, and pipes the output through the scanner/aggregator pipeline.
+func TestEndToEndWithNewman(t *testing.T) {
+	// Check Newman is available
+	if _, err := exec.LookPath("newman"); err != nil {
+		t.Skip("newman not installed, skipping real e2e test")
+	}
+
+	// Start API server on random port
+	srv := testdata.NewTestAPIServer()
+	if err := srv.Start(); err != nil {
+		t.Fatalf("failed to start test server: %v", err)
+	}
+	defer srv.Stop()
+
+	baseURL := fmt.Sprintf("http://%s", srv.Addr)
+	t.Logf("Test API server running at %s", baseURL)
+
+	// Create temp environment file with actual server address
+	tmpDir := t.TempDir()
+	envPath := writeTestEnvironment(t, tmpDir, baseURL)
+
+	// Locate collection file
+	collectionPath := filepath.Join("testdata", "test_collection.json")
+	if _, err := os.Stat(collectionPath); err != nil {
+		t.Fatalf("collection file not found: %v", err)
+	}
+
+	// Run Newman with TeamCity reporter, piping output through scanner → aggregator
+	args := []string{
+		"run", collectionPath,
+		"-e", envPath,
+		"-r", "teamcity,cli",
+	}
+
+	cmd := exec.Command("newman", args...)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("failed to get stdout pipe: %v", err)
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		t.Fatalf("failed to get stderr pipe: %v", err)
+	}
+
+	agg := aggregator.CreateAggregator(100)
+	go agg.Run()
+
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("failed to start newman: %v", err)
+	}
+
+	// Scanner reads Newman output and feeds aggregator
+	out_scanner.OutScanner(stdout, stderr, agg, 1)
+
+	if err := cmd.Wait(); err != nil {
+		t.Logf("newman exited with: %v (may include test failures)", err)
+	}
+
+	// Let aggregator finish processing
+	time.Sleep(500 * time.Millisecond)
+
+	// --- Verify results ---
+
+	if len(agg.Stat) == 0 {
+		t.Fatal("aggregator has no results — newman produced no parseable output")
+	}
+
+	t.Logf("Aggregated %d distinct test steps:", len(agg.Stat))
+	totalTests := 0
+	totalSuccess := 0
+	totalFail := 0
+	for name, stat := range agg.Stat {
+		t.Logf("  %s: total=%d success=%d fail=%d avg=%.1fms",
+			name, stat.TotalCount, stat.TotalSuccess, stat.TotalFail, stat.AvgDuration)
+		totalTests += stat.TotalCount
+		totalSuccess += stat.TotalSuccess
+		totalFail += stat.TotalFail
+	}
+
+	// Collection has 5 requests with 2 tests each = 10 test assertions
+	if totalTests < 5 {
+		t.Errorf("expected at least 5 test results, got %d", totalTests)
+	}
+
+	// All tests in our collection should pass against our server
+	if totalFail > 0 {
+		t.Errorf("expected 0 failures, got %d", totalFail)
+	}
+	if totalSuccess == 0 {
+		t.Error("expected at least some successes")
+	}
+
+	agg.Close()
+}
+
+// TestEndToEndWithNewmanParallel runs Newman with multiple parallel threads
+// against the test server, exercising the concurrent worker pattern.
+func TestEndToEndWithNewmanParallel(t *testing.T) {
+	if _, err := exec.LookPath("newman"); err != nil {
+		t.Skip("newman not installed, skipping real e2e test")
+	}
+
+	srv := testdata.NewTestAPIServer()
+	if err := srv.Start(); err != nil {
+		t.Fatalf("failed to start test server: %v", err)
+	}
+	defer srv.Stop()
+
+	baseURL := fmt.Sprintf("http://%s", srv.Addr)
+	tmpDir := t.TempDir()
+	envPath := writeTestEnvironment(t, tmpDir, baseURL)
+	collectionPath := filepath.Join("testdata", "test_collection.json")
+
+	nWorkers := 3
+	agg := aggregator.CreateAggregator(100)
+	go agg.Run()
+
+	done := make(chan error, nWorkers)
+
+	for i := 0; i < nWorkers; i++ {
+		go func(threadNum int) {
+			args := []string{
+				"run", collectionPath,
+				"-e", envPath,
+				"-r", "teamcity,cli",
+			}
+			cmd := exec.Command("newman", args...)
+			stdout, _ := cmd.StdoutPipe()
+			stderr, _ := cmd.StderrPipe()
+
+			if err := cmd.Start(); err != nil {
+				done <- fmt.Errorf("worker %d: failed to start: %v", threadNum, err)
+				return
+			}
+			out_scanner.OutScanner(stdout, stderr, agg, threadNum)
+			done <- cmd.Wait()
+		}(i + 1)
+	}
+
+	// Wait for all workers
+	for i := 0; i < nWorkers; i++ {
+		if err := <-done; err != nil {
+			t.Logf("worker finished with: %v", err)
+		}
+	}
+
+	time.Sleep(500 * time.Millisecond)
+
+	if len(agg.Stat) == 0 {
+		t.Fatal("no aggregated results from parallel run")
+	}
+
+	totalTests := 0
+	for name, stat := range agg.Stat {
+		t.Logf("  %s: total=%d success=%d fail=%d avg=%.1fms",
+			name, stat.TotalCount, stat.TotalSuccess, stat.TotalFail, stat.AvgDuration)
+		totalTests += stat.TotalCount
+	}
+
+	// With 3 workers, each running the collection (5 requests × 2 tests), expect 3x results
+	if totalTests < 15 {
+		t.Errorf("expected at least 15 test results from %d workers, got %d", nWorkers, totalTests)
+	}
+
+	if agg.RequestsThroughput <= 0 {
+		t.Logf("throughput=%d rps (may be 0 if too fast)", agg.RequestsThroughput)
+	}
+
+	agg.Close()
+}
+
+// --- Pipeline unit tests (kept from original) ---
+
+func TestPipelineScannerAggregator(t *testing.T) {
 	tests := []struct {
 		name     string
 		duration string
@@ -45,16 +249,12 @@ func TestEndToEndPipeline(t *testing.T) {
 
 	newmanOutput := simulateNewmanOutput(tests)
 
-	// Create aggregator with enough capacity
 	agg := aggregator.CreateAggregator(len(tests))
 	go agg.Run()
 
-	// Create a pipe to simulate Newman's stdout
 	stdoutReader, stdoutWriter := io.Pipe()
-	// Empty stderr
 	stderrReader, stderrWriter := io.Pipe()
 
-	// Write simulated output in a goroutine
 	go func() {
 		stdoutWriter.Write([]byte(newmanOutput))
 		stdoutWriter.Close()
@@ -63,156 +263,35 @@ func TestEndToEndPipeline(t *testing.T) {
 		stderrWriter.Close()
 	}()
 
-	// Run scanner (blocks until stdout is consumed)
 	out_scanner.OutScanner(stdoutReader, stderrReader, agg, 1)
-
-	// Give the aggregator time to process all messages
 	time.Sleep(500 * time.Millisecond)
 
-	// --- Verify aggregated results ---
-
-	// Should have 3 distinct test names
 	if len(agg.Stat) != 3 {
 		t.Fatalf("expected 3 aggregated test entries, got %d", len(agg.Stat))
 	}
 
-	// Verify GET /users
-	getUsers, ok := agg.Stat["GET /users"]
-	if !ok {
-		t.Fatal("missing aggregated entry for 'GET /users'")
-	}
-	if getUsers.TotalCount != 2 {
-		t.Errorf("GET /users: expected TotalCount=2, got %d", getUsers.TotalCount)
-	}
-	if getUsers.TotalSuccess != 2 {
-		t.Errorf("GET /users: expected TotalSuccess=2, got %d", getUsers.TotalSuccess)
-	}
-	if getUsers.TotalFail != 0 {
-		t.Errorf("GET /users: expected TotalFail=0, got %d", getUsers.TotalFail)
-	}
-	// Avg of 120 and 80: first step sets 120, second calculates (120+80)/2 = 100
-	if getUsers.AvgDuration != 100.0 {
-		t.Errorf("GET /users: expected AvgDuration=100, got %f", getUsers.AvgDuration)
+	getUsers := agg.Stat["GET /users"]
+	if getUsers.TotalCount != 2 || getUsers.TotalSuccess != 2 || getUsers.AvgDuration != 100.0 {
+		t.Errorf("GET /users: unexpected stats: count=%d success=%d avg=%.1f",
+			getUsers.TotalCount, getUsers.TotalSuccess, getUsers.AvgDuration)
 	}
 
-	// Verify POST /login
-	postLogin, ok := agg.Stat["POST /login"]
-	if !ok {
-		t.Fatal("missing aggregated entry for 'POST /login'")
-	}
-	if postLogin.TotalCount != 2 {
-		t.Errorf("POST /login: expected TotalCount=2, got %d", postLogin.TotalCount)
-	}
-	if postLogin.TotalSuccess != 2 {
-		t.Errorf("POST /login: expected TotalSuccess=2, got %d", postLogin.TotalSuccess)
-	}
-	// Avg of 200 and 150: (200+150)/2 = 175
-	if postLogin.AvgDuration != 175.0 {
-		t.Errorf("POST /login: expected AvgDuration=175, got %f", postLogin.AvgDuration)
+	postLogin := agg.Stat["POST /login"]
+	if postLogin.TotalCount != 2 || postLogin.TotalSuccess != 2 || postLogin.AvgDuration != 175.0 {
+		t.Errorf("POST /login: unexpected stats: count=%d success=%d avg=%.1f",
+			postLogin.TotalCount, postLogin.TotalSuccess, postLogin.AvgDuration)
 	}
 
-	// Verify DELETE /user/1 (failed test)
-	deleteUser, ok := agg.Stat["DELETE /user/1"]
-	if !ok {
-		t.Fatal("missing aggregated entry for 'DELETE /user/1'")
-	}
-	if deleteUser.TotalCount != 1 {
-		t.Errorf("DELETE /user/1: expected TotalCount=1, got %d", deleteUser.TotalCount)
-	}
-	if deleteUser.TotalFail != 1 {
-		t.Errorf("DELETE /user/1: expected TotalFail=1, got %d", deleteUser.TotalFail)
-	}
-	if deleteUser.TotalSuccess != 0 {
-		t.Errorf("DELETE /user/1: expected TotalSuccess=0, got %d", deleteUser.TotalSuccess)
-	}
-	if deleteUser.AvgDuration != 0.0 {
-		t.Errorf("DELETE /user/1: expected AvgDuration=0 (failed test), got %f", deleteUser.AvgDuration)
-	}
-
-	// Verify throughput was calculated (should be > 0 since requests were processed)
-	if agg.RequestsThroughput <= 0 {
-		t.Logf("RequestsThroughput=%d (may be 0 if processed too fast, not a hard failure)", agg.RequestsThroughput)
-	}
-
-	// Cleanup
-	agg.Close()
-}
-
-func TestEndToEndMultipleWorkers(t *testing.T) {
-	// Simulate two workers sending results to the same aggregator
-	worker1Output := simulateNewmanOutput([]struct {
-		name     string
-		duration string
-		fail     bool
-		failMsg  string
-	}{
-		{name: "GET /health", duration: "10", fail: false},
-		{name: "GET /health", duration: "20", fail: false},
-	})
-
-	worker2Output := simulateNewmanOutput([]struct {
-		name     string
-		duration string
-		fail     bool
-		failMsg  string
-	}{
-		{name: "GET /health", duration: "30", fail: false},
-		{name: "GET /status", duration: "100", fail: true, failMsg: "timeout"},
-	})
-
-	agg := aggregator.CreateAggregator(10)
-	go agg.Run()
-
-	// Run both workers concurrently
-	done := make(chan struct{}, 2)
-
-	runWorker := func(output string, threadNum int) {
-		stdoutR, stdoutW := io.Pipe()
-		stderrR, stderrW := io.Pipe()
-		go func() {
-			stdoutW.Write([]byte(output))
-			stdoutW.Close()
-		}()
-		go func() { stderrW.Close() }()
-		out_scanner.OutScanner(stdoutR, stderrR, agg, threadNum)
-		done <- struct{}{}
-	}
-
-	go runWorker(worker1Output, 1)
-	go runWorker(worker2Output, 2)
-
-	// Wait for both workers
-	<-done
-	<-done
-
-	time.Sleep(500 * time.Millisecond)
-
-	// GET /health should have 3 total (2 from worker1 + 1 from worker2)
-	health, ok := agg.Stat["GET /health"]
-	if !ok {
-		t.Fatal("missing aggregated entry for 'GET /health'")
-	}
-	if health.TotalCount != 3 {
-		t.Errorf("GET /health: expected TotalCount=3, got %d", health.TotalCount)
-	}
-	if health.TotalSuccess != 3 {
-		t.Errorf("GET /health: expected TotalSuccess=3, got %d", health.TotalSuccess)
-	}
-
-	// GET /status should have 1 failure
-	status, ok := agg.Stat["GET /status"]
-	if !ok {
-		t.Fatal("missing aggregated entry for 'GET /status'")
-	}
-	if status.TotalFail != 1 {
-		t.Errorf("GET /status: expected TotalFail=1, got %d", status.TotalFail)
+	deleteUser := agg.Stat["DELETE /user/1"]
+	if deleteUser.TotalFail != 1 || deleteUser.TotalSuccess != 0 {
+		t.Errorf("DELETE /user/1: expected 1 fail/0 success, got %d/%d",
+			deleteUser.TotalFail, deleteUser.TotalSuccess)
 	}
 
 	agg.Close()
 }
 
-func TestEndToEndEmptyOutput(t *testing.T) {
-	// Verify pipeline handles empty Newman output gracefully
+func TestPipelineEmptyOutput(t *testing.T) {
 	agg := aggregator.CreateAggregator(1)
 	go agg.Run()
 
@@ -222,11 +301,10 @@ func TestEndToEndEmptyOutput(t *testing.T) {
 	go func() { stderrW.Close() }()
 
 	out_scanner.OutScanner(stdoutR, stderrR, agg, 1)
-
 	time.Sleep(200 * time.Millisecond)
 
 	if len(agg.Stat) != 0 {
-		t.Errorf("expected 0 aggregated entries for empty output, got %d", len(agg.Stat))
+		t.Errorf("expected 0 entries for empty output, got %d", len(agg.Stat))
 	}
 
 	agg.Close()

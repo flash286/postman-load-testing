@@ -1,0 +1,151 @@
+{
+	"info": {
+		"name": "Load Test Collection",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"item": [
+		{
+			"name": "Health Check",
+			"request": {
+				"method": "GET",
+				"url": "{{base_url}}/health"
+			},
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"pm.test('Health returns 200', function () {",
+							"    pm.response.to.have.status(200);",
+							"});",
+							"pm.test('Status is ok', function () {",
+							"    var json = pm.response.json();",
+							"    pm.expect(json.status).to.eql('ok');",
+							"});"
+						],
+						"type": "text/javascript"
+					}
+				}
+			]
+		},
+		{
+			"name": "Get Users",
+			"request": {
+				"method": "GET",
+				"url": "{{base_url}}/users"
+			},
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"pm.test('Get users returns 200', function () {",
+							"    pm.response.to.have.status(200);",
+							"});",
+							"pm.test('Response is an array', function () {",
+							"    var json = pm.response.json();",
+							"    pm.expect(json).to.be.an('array');",
+							"    pm.expect(json.length).to.be.greaterThan(0);",
+							"});"
+						],
+						"type": "text/javascript"
+					}
+				}
+			]
+		},
+		{
+			"name": "Get User By ID",
+			"request": {
+				"method": "GET",
+				"url": "{{base_url}}/users/1"
+			},
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"pm.test('Get user returns 200', function () {",
+							"    pm.response.to.have.status(200);",
+							"});",
+							"pm.test('User has expected fields', function () {",
+							"    var json = pm.response.json();",
+							"    pm.expect(json).to.have.property('id');",
+							"    pm.expect(json).to.have.property('name');",
+							"    pm.expect(json).to.have.property('email');",
+							"});"
+						],
+						"type": "text/javascript"
+					}
+				}
+			]
+		},
+		{
+			"name": "Login",
+			"request": {
+				"method": "POST",
+				"url": "{{base_url}}/login",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\"email\": \"alice@example.com\", \"password\": \"secret\"}"
+				}
+			},
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"pm.test('Login returns 200', function () {",
+							"    pm.response.to.have.status(200);",
+							"});",
+							"pm.test('Response has token', function () {",
+							"    var json = pm.response.json();",
+							"    pm.expect(json).to.have.property('token');",
+							"});"
+						],
+						"type": "text/javascript"
+					}
+				}
+			]
+		},
+		{
+			"name": "Create User",
+			"request": {
+				"method": "POST",
+				"url": "{{base_url}}/users",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\"name\": \"TestUser\", \"email\": \"test@example.com\"}"
+				}
+			},
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"pm.test('Create user returns 201', function () {",
+							"    pm.response.to.have.status(201);",
+							"});",
+							"pm.test('User has ID', function () {",
+							"    var json = pm.response.json();",
+							"    pm.expect(json.id).to.be.greaterThan(0);",
+							"});"
+						],
+						"type": "text/javascript"
+					}
+				}
+			]
+		}
+	]
+}
