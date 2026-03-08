@@ -1,16 +1,18 @@
 package console_printer
 
 import (
-	"github.com/gosuri/uilive"
-	"fmt"
 	"bytes"
-	"postman-load-testing/aggregator"
-	"github.com/olekukonko/tablewriter"
-	"sort"
+	"fmt"
 	"io"
+	"sort"
+	"time"
+
+	"github.com/gosuri/uilive"
+	"github.com/olekukonko/tablewriter"
+
+	"postman-load-testing/aggregator"
 	"postman-load-testing/common"
 	"postman-load-testing/logger"
-	"time"
 )
 
 type ConsoleStatusPrinter struct {
@@ -23,8 +25,9 @@ func (p *ConsoleStatusPrinter) Close() {
 }
 
 func (p *ConsoleStatusPrinter) Run() {
-
 	timer := time.NewTicker(time.Second * 1)
+	defer timer.Stop()
+
 	writer := uilive.New()
 	table := CreateStatTable(writer)
 	writer.Start()
@@ -32,15 +35,15 @@ func (p *ConsoleStatusPrinter) Run() {
 	for {
 		select {
 		case <-timer.C:
-			renderResultTable(table, p.aggregateWorker.Stat, p.aggregateWorker.RequestsThroughput)
+			renderResultTable(table, p.aggregateWorker.GetStat(), p.aggregateWorker.GetThroughput())
 			table.ClearRows()
 			table.ClearFooter()
 		case <-p.Quit:
 			writer.Stop()
 			buffer := bytes.NewBufferString("\n")
 			finalTable := CreateStatTable(buffer)
-			finalTable.SetCaption(true,"Final Results")
-			renderResultTable(finalTable, p.aggregateWorker.Stat, p.aggregateWorker.RequestsThroughput)
+			finalTable.SetCaption(true, "Final Results")
+			renderResultTable(finalTable, p.aggregateWorker.GetStat(), p.aggregateWorker.GetThroughput())
 			logger.Log.Println(buffer.String())
 			return
 		}
@@ -64,9 +67,7 @@ func renderResultTable(table *tablewriter.Table, stat map[string]*common.Aggrega
 	sort.Strings(keys)
 
 	for _, key := range keys {
-
 		value := stat[key]
-
 		datapoint := []string{
 			value.Name,
 			fmt.Sprintf("%v ms", value.AvgDuration),
@@ -75,8 +76,8 @@ func renderResultTable(table *tablewriter.Table, stat map[string]*common.Aggrega
 			fmt.Sprintf("%v", value.TotalCount),
 		}
 		table.Append(datapoint)
-		table.SetFooter([]string{"", "", "", "Requests Throughput", fmt.Sprintf("%v rps", requestsThroughput)})
 	}
+	table.SetFooter([]string{"", "", "", "Requests Throughput", fmt.Sprintf("%v rps", requestsThroughput)})
 	table.Render()
 }
 

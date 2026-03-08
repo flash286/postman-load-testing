@@ -22,7 +22,7 @@ func init() {
 	}
 
 	if err2 != nil {
-		panic(err1)
+		panic(err2)
 	}
 
 	Log = log.New(file, "", log.LstdFlags)

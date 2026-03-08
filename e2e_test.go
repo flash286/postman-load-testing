@@ -123,15 +123,16 @@ func TestEndToEndWithNewman(t *testing.T) {
 
 	// --- Verify results ---
 
-	if len(agg.Stat) == 0 {
+	stats := agg.GetStat()
+	if len(stats) == 0 {
 		t.Fatal("aggregator has no results — newman produced no parseable output")
 	}
 
-	t.Logf("Aggregated %d distinct test steps:", len(agg.Stat))
+	t.Logf("Aggregated %d distinct test steps:", len(stats))
 	totalTests := 0
 	totalSuccess := 0
 	totalFail := 0
-	for name, stat := range agg.Stat {
+	for name, stat := range stats {
 		t.Logf("  %s: total=%d success=%d fail=%d avg=%.1fms",
 			name, stat.TotalCount, stat.TotalSuccess, stat.TotalFail, stat.AvgDuration)
 		totalTests += stat.TotalCount
@@ -208,12 +209,13 @@ func TestEndToEndWithNewmanParallel(t *testing.T) {
 
 	time.Sleep(500 * time.Millisecond)
 
-	if len(agg.Stat) == 0 {
+	stats := agg.GetStat()
+	if len(stats) == 0 {
 		t.Fatal("no aggregated results from parallel run")
 	}
 
 	totalTests := 0
-	for name, stat := range agg.Stat {
+	for name, stat := range stats {
 		t.Logf("  %s: total=%d success=%d fail=%d avg=%.1fms",
 			name, stat.TotalCount, stat.TotalSuccess, stat.TotalFail, stat.AvgDuration)
 		totalTests += stat.TotalCount
@@ -224,8 +226,9 @@ func TestEndToEndWithNewmanParallel(t *testing.T) {
 		t.Errorf("expected at least 15 test results from %d workers, got %d", nWorkers, totalTests)
 	}
 
-	if agg.RequestsThroughput <= 0 {
-		t.Logf("throughput=%d rps (may be 0 if too fast)", agg.RequestsThroughput)
+	throughput := agg.GetThroughput()
+	if throughput <= 0 {
+		t.Logf("throughput=%d rps (may be 0 if too fast)", throughput)
 	}
 
 	agg.Close()
@@ -286,15 +289,16 @@ func TestEndToEndModernFormat(t *testing.T) {
 
 	time.Sleep(500 * time.Millisecond)
 
-	if len(agg.Stat) == 0 {
+	stats := agg.GetStat()
+	if len(stats) == 0 {
 		t.Fatal("aggregator has no results — newman produced no parseable output for modern format collection")
 	}
 
-	t.Logf("Modern format: aggregated %d distinct test steps:", len(agg.Stat))
+	t.Logf("Modern format: aggregated %d distinct test steps:", len(stats))
 	totalTests := 0
 	totalSuccess := 0
 	totalFail := 0
-	for name, stat := range agg.Stat {
+	for name, stat := range stats {
 		t.Logf("  %s: total=%d success=%d fail=%d avg=%.1fms",
 			name, stat.TotalCount, stat.TotalSuccess, stat.TotalFail, stat.AvgDuration)
 		totalTests += stat.TotalCount
@@ -354,23 +358,24 @@ func TestPipelineScannerAggregator(t *testing.T) {
 	out_scanner.OutScanner(stdoutReader, stderrReader, agg, 1)
 	time.Sleep(500 * time.Millisecond)
 
-	if len(agg.Stat) != 3 {
-		t.Fatalf("expected 3 aggregated test entries, got %d", len(agg.Stat))
+	stats := agg.GetStat()
+	if len(stats) != 3 {
+		t.Fatalf("expected 3 aggregated test entries, got %d", len(stats))
 	}
 
-	getUsers := agg.Stat["GET /users"]
+	getUsers := stats["GET /users"]
 	if getUsers.TotalCount != 2 || getUsers.TotalSuccess != 2 || getUsers.AvgDuration != 100.0 {
 		t.Errorf("GET /users: unexpected stats: count=%d success=%d avg=%.1f",
 			getUsers.TotalCount, getUsers.TotalSuccess, getUsers.AvgDuration)
 	}
 
-	postLogin := agg.Stat["POST /login"]
+	postLogin := stats["POST /login"]
 	if postLogin.TotalCount != 2 || postLogin.TotalSuccess != 2 || postLogin.AvgDuration != 175.0 {
 		t.Errorf("POST /login: unexpected stats: count=%d success=%d avg=%.1f",
 			postLogin.TotalCount, postLogin.TotalSuccess, postLogin.AvgDuration)
 	}
 
-	deleteUser := agg.Stat["DELETE /user/1"]
+	deleteUser := stats["DELETE /user/1"]
 	if deleteUser.TotalFail != 1 || deleteUser.TotalSuccess != 0 {
 		t.Errorf("DELETE /user/1: expected 1 fail/0 success, got %d/%d",
 			deleteUser.TotalFail, deleteUser.TotalSuccess)
@@ -391,8 +396,141 @@ func TestPipelineEmptyOutput(t *testing.T) {
 	out_scanner.OutScanner(stdoutR, stderrR, agg, 1)
 	time.Sleep(200 * time.Millisecond)
 
-	if len(agg.Stat) != 0 {
-		t.Errorf("expected 0 entries for empty output, got %d", len(agg.Stat))
+	stats := agg.GetStat()
+	if len(stats) != 0 {
+		t.Errorf("expected 0 entries for empty output, got %d", len(stats))
+	}
+
+	agg.Close()
+}
+
+func TestPipelineMalformedOutput(t *testing.T) {
+	// Malformed TeamCity output should not crash the scanner
+	malformed := "##teamcity[testStarted name='Test1' captureStandardOutput='true']\n" +
+		"some random garbage line\n" +
+		"##teamcity[INVALID FORMAT\n" +
+		"##teamcity[testFinished name='Test1' duration='100']\n" +
+		"##teamcity[testFinished name='NonExistent' duration='50']\n" // finished without start
+
+	agg := aggregator.CreateAggregator(10)
+	go agg.Run()
+
+	stdoutR, stdoutW := io.Pipe()
+	stderrR, stderrW := io.Pipe()
+
+	go func() {
+		_, _ = stdoutW.Write([]byte(malformed))
+		_ = stdoutW.Close()
+	}()
+	go func() { _ = stderrW.Close() }()
+
+	out_scanner.OutScanner(stdoutR, stderrR, agg, 1)
+	time.Sleep(300 * time.Millisecond)
+
+	stats := agg.GetStat()
+	// Only Test1 should be parsed (NonExistent had no testStarted)
+	if len(stats) != 1 {
+		t.Errorf("expected 1 aggregated entry from malformed output, got %d", len(stats))
+	}
+	if test1, ok := stats["Test1"]; ok {
+		if test1.TotalSuccess != 1 {
+			t.Errorf("Test1: expected 1 success, got %d", test1.TotalSuccess)
+		}
+	} else {
+		t.Error("Test1 not found in stats")
+	}
+
+	agg.Close()
+}
+
+func TestPipelineAllFailures(t *testing.T) {
+	tests := []struct {
+		name     string
+		duration string
+		fail     bool
+		failMsg  string
+	}{
+		{name: "GET /fail1", duration: "100", fail: true, failMsg: "timeout"},
+		{name: "GET /fail2", duration: "200", fail: true, failMsg: "connection refused"},
+	}
+
+	output := simulateNewmanOutput(tests)
+
+	agg := aggregator.CreateAggregator(10)
+	go agg.Run()
+
+	stdoutR, stdoutW := io.Pipe()
+	stderrR, stderrW := io.Pipe()
+
+	go func() {
+		_, _ = stdoutW.Write([]byte(output))
+		_ = stdoutW.Close()
+	}()
+	go func() { _ = stderrW.Close() }()
+
+	out_scanner.OutScanner(stdoutR, stderrR, agg, 1)
+	time.Sleep(300 * time.Millisecond)
+
+	stats := agg.GetStat()
+	if len(stats) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(stats))
+	}
+
+	for name, stat := range stats {
+		if stat.TotalFail != 1 {
+			t.Errorf("%s: expected 1 fail, got %d", name, stat.TotalFail)
+		}
+		if stat.TotalSuccess != 0 {
+			t.Errorf("%s: expected 0 success, got %d", name, stat.TotalSuccess)
+		}
+		if stat.AvgDuration != 0 {
+			t.Errorf("%s: expected 0 avg duration for failed test, got %.1f", name, stat.AvgDuration)
+		}
+	}
+
+	agg.Close()
+}
+
+func TestCorrectRunningAverage(t *testing.T) {
+	// Verify the running average is computed correctly with 3 data points
+	tests := []struct {
+		name     string
+		duration string
+		fail     bool
+		failMsg  string
+	}{
+		{name: "GET /avg", duration: "100", fail: false},
+		{name: "GET /avg", duration: "200", fail: false},
+		{name: "GET /avg", duration: "300", fail: false},
+	}
+
+	output := simulateNewmanOutput(tests)
+
+	agg := aggregator.CreateAggregator(10)
+	go agg.Run()
+
+	stdoutR, stdoutW := io.Pipe()
+	stderrR, stderrW := io.Pipe()
+
+	go func() {
+		_, _ = stdoutW.Write([]byte(output))
+		_ = stdoutW.Close()
+	}()
+	go func() { _ = stderrW.Close() }()
+
+	out_scanner.OutScanner(stdoutR, stderrR, agg, 1)
+	time.Sleep(300 * time.Millisecond)
+
+	stats := agg.GetStat()
+	avg := stats["GET /avg"]
+	if avg == nil {
+		t.Fatal("GET /avg not found in stats")
+	}
+
+	// Correct average: (100 + 200 + 300) / 3 = 200.0
+	expectedAvg := 200.0
+	if avg.AvgDuration != expectedAvg {
+		t.Errorf("expected avg duration %.1f, got %.1f", expectedAvg, avg.AvgDuration)
 	}
 
 	agg.Close()
